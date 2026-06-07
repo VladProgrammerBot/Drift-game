@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="uk">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Drift Maze Multiplayer</title>
+    <style>
+        html,
+        body,
+        canvas {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            position: fixed;
+            overscroll-behavior: none;
+        }
+
+        body {
+
+            background: #0a0a0a;
+            font-family: sans-serif;
+
+            -webkit-user-select: none;
+            /* Chrome, Safari */
+            -moz-user-select: none;
+            /* Firefox */
+            -ms-user-select: none;
+            /* IE/Edge */
+            user-select: none;
+            /* Standard */
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #00ffcc;
+            z-index: 10;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <h1 id="msg">Move to play</h1>
+        <h3>Same link to connect from another device</h2>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let scrollPosition = window.pageYOffset;
+
+        // Lock scroll
+        document.body.style.position = 'fixed';
+        document.body.style.top = `-${scrollPosition}px`;
+        document.body.style.width = '100%';
+        document.body.classList.add("no-scroll");
+        document.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+        });
+        document.addEventListener('selectstart', function (e) {
+            e.preventDefault();
+        });
+
+        const socket = io();
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let myId = null;
+        let remotePlayers = {};
+        let walls = [];
+        let player = { x: 300, y: 300, vx: 0, vy: 0, radius: 15, accel: 0.8, friction: 0.97, color: '#00ffcc', stun: 0 };
+        let camera = { x: 0, y: 0, zoom: 0.8 };
+        let mouse = { x: 300, y: 300 };
+
+        socket.on('init', (data) => {
+            myId = data.id;
+            walls = data.walls;
+        });
+
+        socket.on('state', (serverPlayers) => {
+            remotePlayers = serverPlayers;
+        });
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            const outerScale = (window.innerWidth * window.innerHeight / 3500000);
+            camera.zoom = (outerScale * 3 + 1) / 4;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = (e.clientX / camera.zoom) + camera.x;
+            mouse.y = (e.clientY / camera.zoom) + camera.y;
+        });
+        window.addEventListener('touchmove', (e) => {
+            mouse.x = (e.changedTouches[0].clientX / camera.zoom) + camera.x;
+            mouse.y = (e.changedTouches[0].clientY / camera.zoom) + camera.y;
+        });
+
+        function checkCollisions() {
+            walls.forEach(wall => {
+                if (player.x + 50 > wall.x && player.x - 50 < wall.x + wall.w &&
+                    player.y + 50 > wall.y && player.y - 50 < wall.y + wall.h) {
+                    let closestX = Math.max(wall.x, Math.min(player.x, wall.x + wall.w));
+                    let closestY = Math.max(wall.y, Math.min(player.y, wall.y + wall.h));
+                    let dx = player.x - closestX;
+                    let dy = player.y - closestY;
+                    let distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance < player.radius && distance > 0) {
+                        let nx = dx / distance;
+                        let ny = dy / distance;
+                        player.x += nx * (player.radius - distance);
+                        player.y += ny * (player.radius - distance);
+                        let dot = player.vx * nx + player.vy * ny;
+                        player.vx = (player.vx - 2 * dot * nx) * 1.3;
+                        player.vy = (player.vy - 2 * dot * ny) * 1.3;
+                        player.stun = 12;
+                    }
+                }
+            });
+        }
+
+        function update() {
+            if (player.stun > 0) {
+                player.stun--;
+                player.color = `rgb(255, ${255 - player.stun * 20}, ${255 - player.stun * 20})`;
+            } else {
+                player.color = '#00ffcc';
+                let dx = mouse.x - player.x;
+                let dy = mouse.y - player.y;
+                let d = Math.sqrt(dx * dx + dy * dy);
+                if (d > 5) {
+                    player.vx += (dx / d) * player.accel;
+                    player.vy += (dy / d) * player.accel;
+                }
+            }
+
+            player.vx *= player.friction;
+            player.vy *= player.friction;
+            player.x += player.vx;
+            player.y += player.vy;
+
+            checkCollisions();
+
+            // Відправка даних на сервер
+            socket.emit('updatePlayer', { x: player.x, y: player.y, color: player.color });
+
+            camera.x += (player.x - (canvas.width / 2) / camera.zoom - camera.x) * 0.1;
+            camera.y += (player.y - (canvas.height / 2) / camera.zoom - camera.y) * 0.1;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.scale(camera.zoom, camera.zoom);
+            ctx.translate(-camera.x, -camera.y);
+
+            // Стіни
+            ctx.fillStyle = '#2a2a2a';
+            walls.forEach(wall => {
+                ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+            });
+
+            // Інші гравці
+            for (let id in remotePlayers) {
+                if (id === myId) continue;
+                let p = remotePlayers[id];
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 15, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Мій гравець
+            ctx.fillStyle = player.color;
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = player.color;
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            requestAnimationFrame(() => { update(); draw(); });
+        }
+        draw();
+    </script>
+</body>
+
+</html>
